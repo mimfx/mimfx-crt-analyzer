@@ -7,7 +7,9 @@ from flask import Flask, jsonify, make_response, request
 app = Flask(__name__)
 ALLOWED_ORIGINS = {"https://crtanalysiswithmimx.netlify.app", "https://mimfx-crt-scanner.netlify.app"}
 HTTP = requests.Session()
-HTTP.headers.update({"User-Agent": "MIM-FX-CRT-Scanner/1.0"})
+HTTP.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36", "Accept": "application/json,text/plain,*/*"})
+CANDLE_CACHE = {}
+CACHE_TTL = 180
 
 @app.after_request
 def cors(response):
@@ -40,19 +42,41 @@ def yahoo_symbol(symbol):
 
 def get_yahoo_candles(symbol, interval, range_):
     ticker = yahoo_symbol(symbol)
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/"+quote(ticker, safe="=^.-")
-    r = HTTP.get(url, params={"interval":interval,"range":range_}, timeout=12)
-    r.raise_for_status()
-    data = r.json()["chart"]
-    if data.get("error") or not data.get("result"): raise ValueError("No Yahoo Finance candles for "+symbol)
-    result=data["result"][0]; q=result["indicators"]["quote"][0]; ts=result.get("timestamp",[])
-    candles=[]
-    for i,t in enumerate(ts):
-        vals=[q.get(k,[])[i] if i<len(q.get(k,[])) else None for k in ("open","high","low","close")]
-        if all(v is not None for v in vals):
-            candles.append({"time":t,"open":float(vals[0]),"high":float(vals[1]),"low":float(vals[2]),"close":float(vals[3])})
-    if len(candles)<30: raise ValueError("Insufficient candle history for "+symbol)
-    return candles, ticker
+    cache_key = (ticker, interval, range_)
+    cached = CANDLE_CACHE.get(cache_key)
+    if cached and time.time() - cached[0] < CACHE_TTL:
+        return cached[1], ticker
+    last_error = None
+    # Try both Yahoo chart hosts and back off on rate limits. Never fabricate candles.
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        url = "https://" + host + "/v8/finance/chart/" + quote(ticker, safe="=^.-")
+        for attempt in range(2):
+            try:
+                r = HTTP.get(url, params={"interval": interval, "range": range_}, timeout=15)
+                if r.status_code == 429:
+                    last_error = RuntimeError("Yahoo Finance rate-limited this request (HTTP 429)")
+                    time.sleep(1.2 * (attempt + 1))
+                    continue
+                r.raise_for_status()
+                payload = r.json().get("chart", {})
+                if payload.get("error") or not payload.get("result"):
+                    raise ValueError("No Yahoo Finance candles for " + symbol)
+                result = payload["result"][0]
+                q = result["indicators"]["quote"][0]
+                ts = result.get("timestamp", [])
+                candles = []
+                for i, stamp in enumerate(ts):
+                    vals = [q.get(k, [])[i] if i < len(q.get(k, [])) else None for k in ("open", "high", "low", "close")]
+                    if all(v is not None for v in vals):
+                        candles.append({"time": int(stamp), "open": float(vals[0]), "high": float(vals[1]), "low": float(vals[2]), "close": float(vals[3])})
+                if len(candles) < 30:
+                    raise ValueError("Insufficient candle history for " + symbol)
+                CANDLE_CACHE[cache_key] = (time.time(), candles)
+                return candles, ticker
+            except Exception as exc:
+                last_error = exc
+                break
+    raise ValueError("Candle feed unavailable for " + symbol + ": " + str(last_error)) from last_error
 
 def get_deriv_candles(symbol, granularity, count=300):
     # Deriv's public market-data WebSocket; no trading/account authorization is requested.
