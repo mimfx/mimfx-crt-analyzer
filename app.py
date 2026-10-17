@@ -1,9 +1,8 @@
 import os
-from flask import Flask, jsonify, make_response
+from flask import Flask, jsonify, make_response, request
 
 app = Flask(__name__)
 
-# Allow the deployed Netlify frontend to call this API from a browser.
 ALLOWED_ORIGINS = {
     "https://crtanalysiswithmimx.netlify.app",
     "https://mimfx-crt-scanner.netlify.app",
@@ -11,7 +10,7 @@ ALLOWED_ORIGINS = {
 
 @app.after_request
 def add_cors_headers(response):
-    origin = request_origin()
+    origin = request.headers.get("Origin", "")
     if origin in ALLOWED_ORIGINS:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
@@ -19,15 +18,10 @@ def add_cors_headers(response):
         response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return response
 
-def request_origin():
-    from flask import request
-    return request.headers.get("Origin", "")
-
+@app.route("/", defaults={"path": ""}, methods=["OPTIONS"])
 @app.route("/<path:path>", methods=["OPTIONS"])
-@app.route("/", methods=["OPTIONS"])
-def options_preflight(path=""):
-    response = make_response("", 204)
-    return response
+def options_preflight(path):
+    return make_response("", 204)
 
 @app.get("/")
 def home():
@@ -50,18 +44,17 @@ def fxcm_status():
         sdk_available = True
     except Exception:
         sdk_available = False
-
     return jsonify({
         "connected": False,
         "sdk_available": sdk_available,
         "credentials_configured": len(missing) == 0,
         "missing_environment_variables": missing,
         "message": (
-            "FXCM SDK is available, but a live session has not been implemented or verified."
+            "ForexConnect package detected, but live login is not implemented or verified."
             if sdk_available else
-            "ForexConnect SDK is not installed in this runtime. Its published Python package targets older Python versions, so compatibility must be solved before enabling live FXCM data."
+            "ForexConnect SDK is not installed in this runtime; live FXCM data is unavailable."
         )
-    }), 200
+    })
 
 @app.get("/api/markets")
 def markets():
