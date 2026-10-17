@@ -1,7 +1,33 @@
 import os
-from flask import Flask, jsonify
+from flask import Flask, jsonify, make_response
 
 app = Flask(__name__)
+
+# Allow the deployed Netlify frontend to call this API from a browser.
+ALLOWED_ORIGINS = {
+    "https://crtanalysiswithmimx.netlify.app",
+    "https://mimfx-crt-scanner.netlify.app",
+}
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request_origin()
+    if origin in ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+def request_origin():
+    from flask import request
+    return request.headers.get("Origin", "")
+
+@app.route("/<path:path>", methods=["OPTIONS"])
+@app.route("/", methods=["OPTIONS"])
+def options_preflight(path=""):
+    response = make_response("", 204)
+    return response
 
 @app.get("/")
 def home():
@@ -17,8 +43,6 @@ def health():
 
 @app.get("/api/fxcm/status")
 def fxcm_status():
-    # Do not claim a broker connection until a compatible ForexConnect runtime
-    # and broker-issued credentials have actually been configured.
     required = ["FXCM_USERNAME", "FXCM_PASSWORD", "FXCM_CONNECTION"]
     missing = [key for key in required if not os.getenv(key)]
     try:
