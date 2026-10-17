@@ -122,25 +122,37 @@ def body_bos(candles, lookback=12):
     return None
 
 def crt_setup(candles):
-    # Conservative CRT candidate: sweep a prior range edge then close back inside it.
-    if len(candles)<20:return None
-    ref=candles[-2]
-    window=candles[-20:-2]
-    top=max(c["high"] for c in window); bottom=min(c["low"] for c in window)
-    last=candles[-1]
-    if last["high"]>top and last["close"]<top and last["close"]<last["open"]:
-        direction="BEARISH"; edge=top
-    elif last["low"]<bottom and last["close"]>bottom and last["close"]>last["open"]:
-        direction="BULLISH"; edge=bottom
-    else:return None
-    # Candidate key-level proximity: prior range boundary, FVG/imbalance (3-candle gap), QM-like swing.
-    key=[]
-    if abs(last["close"]-edge) <= max(last["high"]-last["low"],edge*0.0005): key.append("CRT range edge rejection")
-    a,b=candles[-3],candles[-1]
-    if direction=="BULLISH" and b["low"]>a["high"]: key.append("Bullish FVG / imbalance")
-    if direction=="BEARISH" and b["high"]<a["low"]: key.append("Bearish FVG / imbalance")
-    if not key: key.append("Range-edge rejection")
-    return {"direction":direction,"range_level":round(edge,8),"key_levels":key,"candle_time":last["time"]}
+    """
+    Basic candle-range theory sweep-and-reclaim candidate:
+    the latest completed candle sweeps the prior candle's high/low and closes back
+    inside that prior candle's range. This is a candidate, not full MSNR pattern
+    recognition; lower-timeframe body-close BOS is still required by scan().
+    """
+    if len(candles) < 3:
+        return None
+    # Ignore the newest candle because most providers may still be forming it.
+    ref = candles[-3]
+    last = candles[-2]
+    top, bottom = ref["high"], ref["low"]
+    if last["high"] > top and bottom < last["close"] < top and last["close"] < last["open"]:
+        direction, edge = "BEARISH", top
+    elif last["low"] < bottom and bottom < last["close"] < top and last["close"] > last["open"]:
+        direction, edge = "BULLISH", bottom
+    else:
+        return None
+    key_levels = ["Prior-candle CRT range-edge sweep and reclaim"]
+    # Mark a three-candle fair-value gap only when the geometry is explicit.
+    left, middle, right = candles[-4], candles[-3], candles[-2]
+    if direction == "BULLISH" and right["low"] > left["high"]:
+        key_levels.append("Bullish FVG / imbalance")
+    elif direction == "BEARISH" and right["high"] < left["low"]:
+        key_levels.append("Bearish FVG / imbalance")
+    return {
+        "direction": direction,
+        "range_level": round(edge, 8),
+        "key_levels": key_levels,
+        "candle_time": last["time"]
+    }
 
 @app.get("/api/markets")
 def markets():
@@ -162,12 +174,13 @@ def scan():
     source=request.args.get("source","FXCM").upper()
     selected=request.args.get("timeframes","W1,D1,H4").upper().split(",")
     symbols=request.args.get("symbols","EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,USDCHF,NZDUSD,XAUUSD,BTCUSD,ETHUSD").split(",")
-    setups=[]; errors=[]
+    setups=[]; errors=[]; candles_received=0
     for symbol in symbols[:40]:
         symbol=symbol.strip().upper()
         for tf in [x for x in selected if x in ("W1","D1","H4")]:
             try:
                 candles,_=fetch(symbol,tf,"DERIV" if source=="DERIV" else "FX")
+                candles_received += 1
                 candidate=crt_setup(candles)
                 if not candidate: continue
                 confirm={"W1":["D1"],"D1":["H4","H2","H1"],"H4":["H1","M30","M15"]}[tf]
@@ -181,7 +194,7 @@ def scan():
                 if not confirmed: continue
                 setups.append({"symbol":symbol,"source":source,"crt_timeframe":tf,"direction":candidate["direction"],"key_levels":candidate["key_levels"],"range_level":candidate["range_level"],"confirmations":confirmed,"quality":"Body-close BOS + range-edge rejection","candle_time":candidate["candle_time"]})
             except Exception as e: errors.append({"symbol":symbol,"timeframe":tf,"error":str(e)[:120]})
-    return jsonify({"connected":bool(setups) or not errors,"source":source,"setups":setups,"errors":errors,"scanned_symbols":symbols[:40],"message":"Scan complete. No qualifying CRTs found." if not setups else "Scan complete."})
+    return jsonify({"connected":candles_received > 0,"candles_checked":candles_received,"source":source,"setups":setups,"errors":errors,"scanned_symbols":symbols[:40],"message":("Candles fetched and rules checked; no qualifying CRT + BOS setup found." if not setups and candles_received else ("Scan complete." if setups else "No candles fetched; check feed errors."))})
 
 @app.get("/api/fxcm/status")
 def fxcm_status():
